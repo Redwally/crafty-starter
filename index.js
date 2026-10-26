@@ -2,21 +2,6 @@
  * ==============================================================================
  * Minecraft Auto-Start Proxy pour Crafty Controller v4 (Fabric / Vanilla / Forge)
  * ==============================================================================
- * 
- * Architecture du Proxy :
- * 1. Quand le serveur Fabric est 'running' :
- *    - Redirige tout le trafic du port 25565 vers 127.0.0.1:25566 en proxy TCP
- *      transparent bidirectionnel via net.Socket.pipe.
- * 
- * 2. Quand le serveur Fabric N'EST PAS 'running' :
- *    - Gestion du Ping / MOTD dans le menu Minecraft :
- *      Répond aux requêtes de statut pour afficher le MOTD personnalisé et 0/20 joueurs.
- *      MOTD : "§c[Hors Ligne] §fRejoins pour démarrer le serveur"
- *    - Gestion du clic / login :
- *      1. Envoie la requête POST à l'API Crafty pour démarrer le serveur.
- *      2. Renvoie immédiatement le message de déconnexion au joueur :
- *         "§a[AutoStart]\n§eOrdre de démarrage envoyé à Crafty !\n§fRéessaie dans 15 secondes le temps que Fabric charge."
- * ==============================================================================
  */
 
 require('dotenv').config();
@@ -35,7 +20,7 @@ const DUMMY_PORT = parseInt(process.env.DUMMY_PORT, 10) || 25564;
 
 // Configuration API Crafty Controller v4
 const CRAFTY_URL = (process.env.CRAFTY_URL || 'https://host.docker.internal:8443').replace(/\/+$/, '');
-const CRAFTY_TOKEN = process.env.CRAFTY_TOKEN || '';
+const RAW_TOKEN = (process.env.CRAFTY_TOKEN || '').replace(/^Bearer\s+/i, '').trim();
 const CRAFTY_SERVER_ID = process.env.CRAFTY_SERVER_ID || '';
 const CRAFTY_ACTION = process.env.CRAFTY_ACTION || 'start_server';
 
@@ -70,26 +55,33 @@ function logError(tag, message, error) {
   console.error(`[${getTimestamp()}] [${tag}] ${message}${errMsg ? ' : ' + errMsg : ''}`);
 }
 
+// --- Construction des en-têtes universels pour Crafty v4 ---
+function getCraftyHeaders() {
+  return {
+    'Authorization': `Bearer ${RAW_TOKEN}`,
+    'token': RAW_TOKEN,
+    'Content-Type': 'application/json'
+  };
+}
+
 // --- Client Axios configuré pour l'API Crafty ---
-// Ignore les certificats SSL auto-signés très fréquents sur Crafty
 const craftyClient = axios.create({
   timeout: 10000,
   httpsAgent: new https.Agent({
     rejectUnauthorized: false
-  }),
-  headers: {
-    'Authorization': `Bearer ${CRAFTY_TOKEN}`,
-    'Content-Type': 'application/json'
-  }
+  })
 });
 
 /**
  * Vérifie l'état 'running' du serveur Fabric via l'API v2 de Crafty Controller.
  */
 async function checkCraftyServerRunning() {
-  if (!CRAFTY_TOKEN || !CRAFTY_SERVER_ID) return false;
+  if (!RAW_TOKEN || !CRAFTY_SERVER_ID) return false;
   try {
-    const response = await craftyClient.get(`${CRAFTY_URL}/api/v2/servers/${CRAFTY_SERVER_ID}/stats`);
+    const response = await craftyClient.get(
+      `${CRAFTY_URL}/api/v2/servers/${CRAFTY_SERVER_ID}/stats`,
+      { headers: getCraftyHeaders() }
+    );
     if (response.data && response.data.data) {
       return Boolean(response.data.data.running);
     }
@@ -101,6 +93,7 @@ async function checkCraftyServerRunning() {
 
 /**
  * Envoie l'ordre de démarrage à Crafty Controller v4 avec gestion anti-spam.
+ * Renvoie un objet { success: boolean, status?: number, code?: string, error?: string }
  */
 async function triggerCraftyStart(playerName) {
   const now = Date.now();
@@ -109,43 +102,63 @@ async function triggerCraftyStart(playerName) {
   if (isStarting || elapsedSec < START_COOLDOWN_SEC) {
     const remaining = START_COOLDOWN_SEC - elapsedSec;
     log('ANTI-SPAM', `Requête ignorée pour [${playerName}]. Démarrage en cours ou cooldown actif (${remaining > 0 ? remaining : 0}s restantes).`);
-    return;
+    return { success: true, alreadyStarting: true, remaining };
   }
 
-  if (!CRAFTY_TOKEN || !CRAFTY_SERVER_ID) {
+  if (!RAW_TOKEN || !CRAFTY_SERVER_ID) {
     log('WARN', `Impossible de démarrer le serveur : CRAFTY_TOKEN ou CRAFTY_SERVER_ID manquant.`);
-    return;
+    return { success: false, code: 'CONFIG_MISSING', error: 'CRAFTY_TOKEN ou CRAFTY_SERVER_ID manquant' };
   }
-
-  isStarting = true;
-  lastStartRequestTime = now;
 
   log('CRAFTY', `Joueur [${playerName}] a cliqué pour se connecter. Envoi de l'ordre de démarrage à Crafty...`);
 
   const primaryUrl = `${CRAFTY_URL}/api/v2/servers/${CRAFTY_SERVER_ID}/action/${CRAFTY_ACTION}`;
+  const headers = getCraftyHeaders();
 
   try {
-    const res = await craftyClient.post(primaryUrl, {});
-    log('CRAFTY', `Ordre de démarrage accepté par Crafty (Statut: ${res.status}). En attente de Fabric sur ${TARGET_PORT}...`);
-  } catch (err) {
-    const fallbackAction = CRAFTY_ACTION === 'start_server' ? 'start' : 'start_server';
-    const fallbackUrl = `${CRAFTY_URL}/api/v2/servers/${CRAFTY_SERVER_ID}/action/${fallbackAction}`;
-    log('WARN', `Échec sur ${CRAFTY_ACTION} (${err.message}), tentative avec l'action '${fallbackAction}'...`);
-
+    let res;
     try {
-      const fallbackRes = await craftyClient.post(fallbackUrl, {});
-      log('CRAFTY', `Ordre de démarrage accepté via fallback '${fallbackAction}' (Statut: ${fallbackRes.status}).`);
-    } catch (fallbackErr) {
-      logError('CRAFTY', `Échec de l'appel API Crafty`, fallbackErr);
-      setTimeout(() => {
-        isStarting = false;
-      }, 5000);
+      res = await craftyClient.post(primaryUrl, {}, { headers });
+    } catch (primaryErr) {
+      // Si 404 sur l'action par défaut, tenter le fallback sur 'start'
+      if (primaryErr.response && primaryErr.response.status === 404) {
+        const fallbackAction = CRAFTY_ACTION === 'start_server' ? 'start' : 'start_server';
+        const fallbackUrl = `${CRAFTY_URL}/api/v2/servers/${CRAFTY_SERVER_ID}/action/${fallbackAction}`;
+        log('WARN', `Action '${CRAFTY_ACTION}' introuvable (404), tentative avec '${fallbackAction}'...`);
+        res = await craftyClient.post(fallbackUrl, {}, { headers });
+      } else {
+        throw primaryErr;
+      }
     }
+
+    if (res && res.status >= 200 && res.status < 300) {
+      isStarting = true;
+      lastStartRequestTime = now;
+      log('CRAFTY', `Ordre de démarrage accepté par Crafty (Code ${res.status}). En attente de Fabric sur ${TARGET_PORT}...`);
+      return { success: true, status: res.status };
+    } else {
+      throw new Error(`Statut HTTP inattendu: ${res ? res.status : 'inconnu'}`);
+    }
+  } catch (err) {
+    isStarting = false;
+    const httpStatus = err.response?.status;
+    const errorCode = httpStatus || err.code || 'ERREUR';
+    
+    // Log détaillé du corps de réponse de Crafty si présent (utile pour débugger les 403)
+    const responseBody = err.response?.data ? JSON.stringify(err.response.data) : '';
+    logError('CRAFTY', `Erreur lors de la requête à Crafty (Code ${errorCode})${responseBody ? ' Details: ' + responseBody : ''}`, err);
+
+    return {
+      success: false,
+      status: httpStatus,
+      code: errorCode,
+      error: err.message
+    };
   }
 }
 
 /**
- * Sonde rapidement le port cible pour savoir si le serveur Fabric écoute et accepte les connexions.
+ * Sonde rapidement le port cible pour savoir si le serveur Fabric écoute.
  */
 function probeTargetPort() {
   return new Promise((resolve) => {
@@ -193,21 +206,18 @@ setInterval(updateServerStatus, CHECK_INTERVAL_MS);
 
 /**
  * -----------------------------------------------------------------------------
- * 2. SERVEUR FACTICE MINECRAFT (minecraft-protocol)
- * Utilisé quand le serveur Fabric N'EST PAS 'running'.
+ * SERVEUR FACTICE MINECRAFT (minecraft-protocol)
  * -----------------------------------------------------------------------------
  */
 const dummyServer = mc.createServer({
   host: '127.0.0.1',
   port: DUMMY_PORT,
   'online-mode': false,
-  version: false, // Détection automatique de la version de protocole du client
+  version: false,
   maxPlayers: 20,
   motd: OFFLINE_MOTD,
   hideErrors: true,
   beforePing: (response, client) => {
-    // 2.A Gestion du Ping / MOTD dans le menu :
-    // Renvoyer une description personnalisée au lieu de casser la connexion
     response.version = {
       name: isStarting ? '§6Démarrage en cours...' : '§cFabric Hors Ligne',
       protocol: client.protocolVersion || 765
@@ -229,24 +239,33 @@ const dummyServer = mc.createServer({
 dummyServer.on('connection', (client) => {
   client.on('error', () => {});
 
-  // 2.B Gestion du clic / login :
   client.removeAllListeners('login_start');
-  client.once('login_start', (packet) => {
+  client.once('login_start', async (packet) => {
     const username = packet.username || 'Inconnu';
     const playerIp = client.socket && client.socket.remoteAddress ? client.socket.remoteAddress : 'inconnue';
     log('AUTH', `Tentative de connexion / clic du joueur [${username}] (IP: ${playerIp})`);
 
-    // 1. Envoie la requête POST à l'API Crafty pour lancer le serveur
-    triggerCraftyStart(username);
+    const result = await triggerCraftyStart(username);
 
-    // 2. Renvoie immédiatement le message de déconnexion au joueur
+    let kickMessage;
+    if (result.success) {
+      if (result.alreadyStarting) {
+        kickMessage = "§6[AutoStart]\n§eLe serveur est déjà en cours de démarrage !\n§fLe serveur charge, réessaie dans quelques secondes.";
+      } else {
+        kickMessage = "§a[AutoStart]\n§eOrdre de démarrage envoyé à Crafty !\n§fLe serveur charge, réessaie dans 15s.";
+      }
+    } else {
+      const codeDisplay = result.status || result.code || 'Inconnu';
+      kickMessage = `§c[Erreur AutoStart]\n§fImpossible de contacter Crafty (Code ${codeDisplay}).\n§7Vérifie les logs du proxy.`;
+    }
+
     try {
       client.write('disconnect', {
-        reason: JSON.stringify({ text: DISCONNECT_MESSAGE })
+        reason: JSON.stringify({ text: kickMessage })
       });
       setTimeout(() => {
         try {
-          client._end(DISCONNECT_MESSAGE);
+          client._end(kickMessage);
         } catch (_) {}
       }, 100);
     } catch (err) {
@@ -265,37 +284,28 @@ dummyServer.on('error', (err) => {
 
 /**
  * -----------------------------------------------------------------------------
- * 1. PROXY TCP PRINCIPAL (Port public LISTEN_PORT, ex: 25565)
+ * PROXY TCP PRINCIPAL (Port public LISTEN_PORT, ex: 25565)
  * -----------------------------------------------------------------------------
  */
 const mainProxyServer = net.createServer((clientSocket) => {
   clientSocket.on('error', () => {});
 
   if (isTargetOnline) {
-    // 1. Quand le serveur Fabric est 'running' :
-    // Redirige tout le trafic du port 25565 vers TARGET_HOST:TARGET_PORT
-    // en proxy TCP transparent bidirectionnel via net.Socket.pipe
     const targetSocket = net.connect({ host: TARGET_HOST, port: TARGET_PORT });
 
     clientSocket.pipe(targetSocket);
     targetSocket.pipe(clientSocket);
 
-    targetSocket.on('error', () => {
-      clientSocket.destroy();
-    });
+    targetSocket.on('error', () => clientSocket.destroy());
     clientSocket.on('close', () => targetSocket.destroy());
     targetSocket.on('close', () => clientSocket.destroy());
   } else {
-    // 2. Quand le serveur Fabric N'EST PAS 'running' :
-    // Redirige le flux vers le répondeur interne minecraft-protocol
     const dummySocket = net.connect({ host: '127.0.0.1', port: DUMMY_PORT });
 
     clientSocket.pipe(dummySocket);
     dummySocket.pipe(clientSocket);
 
-    dummySocket.on('error', () => {
-      clientSocket.destroy();
-    });
+    dummySocket.on('error', () => clientSocket.destroy());
     clientSocket.on('close', () => dummySocket.destroy());
     dummySocket.on('close', () => clientSocket.destroy());
   }
@@ -310,7 +320,6 @@ mainProxyServer.listen(LISTEN_PORT, '0.0.0.0', () => {
   log('INIT', ` - UUID Serveur Crafty  : ${CRAFTY_SERVER_ID || '(non défini)'}`);
   log('INIT', `=======================================================`);
 
-  // Vérification initiale
   updateServerStatus();
 });
 
