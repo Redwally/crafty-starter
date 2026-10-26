@@ -15,10 +15,10 @@ Conçu spécialement pour être déployé en quelques secondes avec **Docker** o
 [ Proxy Auto-Start Node.js ]
          │
          ├─── Si le serveur cible (25566) est ÉTEINT :
-         │      ├─ 1. Répond au Server List Ping (MOTD personnalisé "Serveur éteint")
-         │      ├─ 2. Intercepte la connexion du joueur
-         │      ├─ 3. Envoie un appel POST à l'API v2 de Crafty Controller pour démarrer le serveur
-         │      └─ 4. Déconnecte le joueur avec un message en jeu clair (§a/§e/§f)
+         │      ├─ 1. Répond au Server List Ping (MOTD: "§c[Hors Ligne] §fRejoins pour démarrer le serveur", 0/20 joueurs)
+         │      ├─ 2. Intercepte le clic de connexion du joueur
+         │      ├─ 3. Envoie la requête POST à l'API v2 de Crafty Controller pour démarrer Fabric
+         │      └─ 4. Déconnecte le joueur avec : "§a[AutoStart]\n§eOrdre de démarrage envoyé à Crafty !\n§fRéessaie dans 15 secondes..."
          │
          └─── Dès que le serveur cible (25566) est PRÊT :
                 └─ Transmet 100% du flux TCP directement au serveur Minecraft réel
