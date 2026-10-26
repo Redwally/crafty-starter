@@ -40,7 +40,7 @@ crafty-mc-starter/
 ├── .env.example         # Modèle des variables d'environnement
 ├── .gitignore           # Fichiers exclus du versioning Git
 ├── .dockerignore        # Fichiers exclus de l'image Docker
-├── Dockerfile           # Image Docker optimisée sous node:20-alpine
+├── Dockerfile           # Image Docker optimisée sous node:22-alpine
 ├── docker-compose.yml   # Déploiement Docker / Dokploy
 ├── package.json         # Dépendances (minecraft-protocol, axios, dotenv)
 ├── index.js             # Code source principal

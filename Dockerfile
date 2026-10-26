@@ -3,7 +3,7 @@
 # Compatible Dokploy / Portainer / Docker CLI
 # ==============================================================================
 
-FROM node:20-alpine
+FROM node:22-alpine
 
 # Installation de dumb-init pour une gestion propre des signaux d'arrêt POSIX (SIGTERM / SIGINT)
 RUN apk add --no-cache dumb-init
@@ -14,7 +14,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Installation des dépendances de production
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 # Copie du reste des sources
 COPY . .
