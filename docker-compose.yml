@@ -1,0 +1,22 @@
+services:
+  mc-autostart:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crafty-mc-autostart:latest
+    container_name: crafty-mc-autostart
+    restart: always
+    env_file:
+      - .env
+    ports:
+      # Port public 25565 redirigé vers le port d'écoute configuré dans le .env
+      - "${LISTEN_PORT:-25565}:${LISTEN_PORT:-25565}"
+    # NOTE POUR DOKPLOY ET ENVIRONNEMENTS DOCKER :
+    # Si votre serveur Minecraft ou Crafty Controller tourne sur le même hôte que ce conteneur,
+    # vous pouvez activer 'network_mode: host' pour accéder directement à 127.0.0.1 :
+    # network_mode: host
+    # 
+    # Sinon, en mode bridge standard, utilisez 'TARGET_HOST=host.docker.internal' dans votre .env
+    # et ajoutez si nécessaire :
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
